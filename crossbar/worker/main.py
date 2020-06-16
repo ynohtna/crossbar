@@ -28,14 +28,15 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import, print_function
-
+import binascii
 import argparse
 import importlib
 
+import cbor2
+
 from twisted.internet.error import ReactorNotRunning
 
-from crossbar._util import hl, hltype, _add_debug_options, term_print
+from crossbar._util import hl, hlid, hltype, _add_debug_options, term_print
 
 try:
     import vmprof
@@ -98,6 +99,12 @@ def get_argument_parser(parser=None):
                         required=True,
                         help='Crossbar.io worker ID (required).')
 
+    parser.add_argument('-e',
+                        '--extra',
+                        type=str,
+                        required=False,
+                        help='Crossbar.io worker extra configuration from worker.options.extra (optional).')
+
     parser.add_argument('--title',
                         type=str,
                         default=None,
@@ -117,6 +124,11 @@ def get_argument_parser(parser=None):
                         type=str,
                         default=None,
                         help='Shutdown method')
+
+    parser.add_argument('--restart',
+                        type=str,
+                        default=None,
+                        help='Restart method')
 
     if _HAS_VMPROF:
         parser.add_argument('--vmprof',
@@ -172,6 +184,8 @@ def _run_command_exec_worker(options, reactor=None, personality=None):
     flo = make_JSON_observer(sys.__stderr__)
     globalLogPublisher.addObserver(flo)
 
+    term_print('CROSSBAR[{}]:WORKER_STARTING'.format(options.worker))
+
     # Ignore SIGINT so we get consistent behavior on control-C versus
     # sending SIGINT to the controller process. When the controller is
     # shutting down, it sends TERM to all its children but ctrl-C
@@ -204,11 +218,12 @@ def _run_command_exec_worker(options, reactor=None, personality=None):
     klass = getattr(_mod, worker_klass)
 
     log.info(
-        'Starting worker "{worker_id}" for node "{node_id}" on realm "{realm}" with personality "{personality}" {worker_class}',
-        worker_id=options.worker,
-        node_id=options.node,
-        realm=options.realm,
-        personality=Personality.NAME,
+        'Starting {worker_type}-worker "{worker_id}" on node "{node_id}" (personality "{personality}") and local node management realm "{realm}" .. {worker_class}',
+        worker_type=hl(klass.WORKER_TYPE),
+        worker_id=hlid(options.worker),
+        node_id=hlid(options.node),
+        realm=hlid(options.realm),
+        personality=hl(Personality.NAME),
         worker_class=hltype(klass),
     )
     log.info(
@@ -361,7 +376,7 @@ def _run_command_exec_worker(options, reactor=None, personality=None):
         # create a WAMP-over-WebSocket transport server factory
         #
         from autobahn.twisted.websocket import WampWebSocketServerFactory
-        transport_factory = WampWebSocketServerFactory(make_session, u'ws://localhost')
+        transport_factory = WampWebSocketServerFactory(make_session, 'ws://localhost')
         transport_factory.protocol = WorkerServerProtocol
         transport_factory.setProtocolOptions(failByDrop=False)
 
@@ -398,5 +413,8 @@ if __name__ == '__main__':
 
     parser = get_argument_parser()
     args = parser.parse_args(_args)
+
+    if args.extra:
+        args.extra = cbor2.loads(binascii.a2b_hex(args.extra))
 
     _run_command_exec_worker(args)

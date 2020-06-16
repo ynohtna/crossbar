@@ -28,11 +28,10 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 from datetime import datetime
 
 from autobahn.util import utcstr
+from crossbar.worker.rlink import RLinkManager
 
 
 class RouterComponent(object):
@@ -64,12 +63,12 @@ class RouterComponent(object):
         """
         now = datetime.utcnow()
         return {
-            u'id': self.id,
+            'id': self.id,
             # 'started' is used by container-components; keeping it
             # for consistency in the public API
-            u'started': utcstr(self.created),
-            u'uptime': (now - self.created).total_seconds(),
-            u'config': self.config
+            'started': utcstr(self.created),
+            'uptime': (now - self.created).total_seconds(),
+            'config': self.config
         }
 
 
@@ -107,18 +106,34 @@ class RouterRealm(object):
         # this is filled later (after construction) when the router service agent session has been started
         self.session = session
 
+        # router-realm links ("router-to-router connections")
+        self.rlink_manager = RLinkManager(self, controller)
+
         self.created = datetime.utcnow()
+
+        # Crossbar.io role run-time ID -> RouterRealmRole
         self.roles = {}
 
+        # role WAMP name -> Crossbar.io role run-time ID
+        self.role_to_id = {}
+
     def marshal(self):
-        return {
-            u'id': self.id,
-            u'config': self.config,
-            u'created': utcstr(self.created),
-            u'roles': [self.roles[role].marshal() for role in self.roles if self.roles],
-            u'has_router': self.router is not None,
-            u'has_service_session': self.session is not None,
+        marshalled = {
+            'id': self.id,
+            'config': self.config,
+            'created': utcstr(self.created),
+            'roles': [self.roles[role].marshal() for role in self.roles if self.roles],
+            'has_router': self.router is not None,
+            'has_service_session': self.session is not None,
         }
+
+        rlinks = []
+        for link_id in self.rlink_manager.keys():
+            rlinks.append(self.rlink_manager[link_id].marshal())
+
+        marshalled['rlinks'] = rlinks
+
+        return marshalled
 
 
 class RouterRealmRole(object):
@@ -141,6 +156,6 @@ class RouterRealmRole(object):
 
     def marshal(self):
         return {
-            u'id': self.id,
-            u'config': self.config,
+            'id': self.id,
+            'config': self.config,
         }

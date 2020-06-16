@@ -28,17 +28,15 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 import os
 import socket
 
-import twisted
 from twisted.internet.defer import inlineCallbacks, Deferred, returnValue, gatherResults
-from twisted.python.reflect import qual
+from twisted.internet.defer import succeed
 
 from txaio import make_logger
 
+from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.types import CallOptions, ComponentConfig
 
 from crossbar._util import hltype, hlid, hluserid, hl
@@ -101,7 +99,7 @@ class Node(object):
         self._native_workers = personality.native_workers
 
         # node directory
-        self._cbdir = cbdir or u'.'
+        self._cbdir = cbdir or '.'
 
         # reactor we should run on
         if reactor is None:
@@ -119,7 +117,7 @@ class Node(object):
         self._router_session_factory = None
 
         # the node controller realm
-        self._realm = u'crossbar'
+        self._realm = 'crossbar'
 
         # config of this node.
         self._config = None
@@ -142,6 +140,7 @@ class Node(object):
         # node controller session (a singleton ApplicationSession embedded
         # in the local node router)
         self._controller = None
+        self._service_sessions = {}
 
         # node shutdown triggers, one or more of checkconfig.NODE_SHUTDOWN_MODES
         self._node_shutdown_triggers = [NODE_SHUTDOWN_ON_WORKER_EXIT]
@@ -198,6 +197,8 @@ class Node(object):
 
         IMPORTANT: this function is run _before_ start of Twisted reactor!
         """
+        self.log.debug('{klass}.load_config(configfile={configfile}, default={default}) ..',
+                       klass=self.__class__.__name__, configfile=configfile, default=default)
         if configfile:
             config_path = os.path.abspath(os.path.join(self._cbdir, configfile))
 
@@ -213,9 +214,9 @@ class Node(object):
                 config_source = Node.CONFIG_SOURCE_DEFAULT
             else:
                 self._config = {
-                    u'version': 2,
-                    u'controller': {},
-                    u'workers': []
+                    'version': 2,
+                    'controller': {},
+                    'workers': []
                 }
                 config_source = Node.CONFIG_SOURCE_EMPTY
 
@@ -224,47 +225,101 @@ class Node(object):
         return config_source, config_path
 
     def _add_global_roles(self):
-        self.log.info('No extra node router roles')
-
-    def _add_worker_role(self, worker_auth_role, options):
-        worker_role_config = {
-            u"name": worker_auth_role,
-            u"permissions": [
-                # the worker requires these permissions to work:
+        controller_role_config = {
+            # there is exactly 1 WAMP component authenticated under authrole "controller": the node controller
+            "name": "controller",
+            "permissions": [
                 {
-                    # worker_auth_role: "crossbar.worker.worker-001"
-                    u"uri": worker_auth_role,
-                    u"match": u"prefix",
-                    u"allow": {
-                        u"call": False,
-                        u"register": True,
-                        u"publish": True,
-                        u"subscribe": False
+                    # the node controller can (locally) do "anything"
+                    "uri": "crossbar.",
+                    "match": "prefix",
+                    "allow": {
+                        "call": True,
+                        "register": True,
+                        "publish": True,
+                        "subscribe": True
                     },
-                    u"disclose": {
-                        u"caller": False,
-                        u"publisher": False
+                    "disclose": {
+                        "caller": True,
+                        "publisher": True
                     },
-                    u"cache": True
-                },
-                {
-                    u"uri": u"crossbar.get_status",
-                    u"match": u"exact",
-                    u"allow": {
-                        u"call": True,
-                        u"register": False,
-                        u"publish": False,
-                        u"subscribe": False
-                    },
-                    u"disclose": {
-                        u"caller": False,
-                        u"publisher": False
-                    },
-                    u"cache": True
+                    "cache": True
                 }
             ]
         }
+        self._router_factory.add_role(self._realm, controller_role_config)
+        self.log.info('{func} node-wide role "{authrole}" added on node management router realm "{realm}"',
+                      func=hltype(self._add_global_roles), authrole=hlid(controller_role_config['name']),
+                      realm=hlid(self._realm))
+
+    def _add_worker_role(self, worker_auth_role, options):
+        worker_role_config = {
+            # each (native) worker is authenticated under a worker-specific authrole
+            "name": worker_auth_role,
+            "permissions": [
+                # the worker requires these permissions to work:
+                {
+                    # management API provided by the worker. note that the worker management API is provided under
+                    # the URI prefix "crossbar.worker.<worker_id>". note that the worker is also authenticated
+                    # under authrole <worker_auth_role> on realm "crossbar"
+                    "uri": worker_auth_role,
+                    "match": "prefix",
+                    "allow": {
+                        "call": True,
+                        "register": True,
+                        "publish": True,
+                        "subscribe": True
+                    },
+                    "disclose": {
+                        "caller": True,
+                        "publisher": True
+                    },
+                    "cache": True
+                },
+                {
+                    # controller procedure called by the worker (to check for controller status)
+                    "uri": "crossbar.get_status",
+                    "match": "exact",
+                    "allow": {
+                        "call": True,
+                        "register": False,
+                        "publish": False,
+                        "subscribe": False
+                    },
+                    "disclose": {
+                        "caller": True,
+                        "publisher": True
+                    },
+                    "cache": True
+                }
+            ]
+        }
+        # if configured to expose the controller connection within the worker (to make it available
+        # in user code such as dynamic authenticators and router/container components), also add
+        # permissions to actually use the (local) node management API
+        if options.get('expose_controller', True):
+            vendor_permissions = {
+                "uri": "crossbar.",
+                "match": "prefix",
+                "allow": {
+                    "call": True,
+                    "register": False,
+                    "publish": False,
+                    "subscribe": True
+                },
+                "disclose": {
+                    "caller": True,
+                    "publisher": True
+                },
+                "cache": True
+            }
+            worker_role_config["permissions"].append(vendor_permissions)
+
         self._router_factory.add_role(self._realm, worker_role_config)
+
+        self.log.info('worker-specific role "{authrole}" added on node management router realm "{realm}" {func}',
+                      func=hltype(self._add_worker_role), authrole=hlid(worker_role_config['name']),
+                      realm=hlid(self._realm))
 
     def _drop_worker_role(self, worker_auth_role):
         self._router_factory.drop_role(self._realm, worker_auth_role)
@@ -285,6 +340,24 @@ class Node(object):
             self._node_shutdown_triggers = [NODE_SHUTDOWN_ON_WORKER_EXIT]
             self.log.info("Using default node shutdown triggers {triggers}", triggers=self._node_shutdown_triggers)
 
+    def set_service_session(self, session, realm, authrole=None):
+        self.log.info('{func}(session={session}, realm="{realm}", authrole="{authrole}")',
+                      func=hltype(self.set_service_session), session=session,
+                      realm=hlid(realm), authrole=hlid(authrole))
+        if realm not in self._service_sessions:
+            self._service_sessions[realm] = {}
+        self._service_sessions[realm][authrole] = session
+
+    def get_service_session(self, realm, authrole=None):
+        if realm in self._service_sessions:
+            if authrole in self._service_sessions[realm]:
+                session = self._service_sessions[realm][authrole]
+                self.log.info('{func}(session={session}, realm="{realm}", authrole="{authrole}")',
+                              func=hltype(self.get_service_session), session=session,
+                              realm=hlid(realm), authrole=hlid(authrole))
+                return succeed(session)
+        return succeed(None)
+
     def stop(self):
         self._controller._shutdown_was_clean = True
         return self._controller.shutdown()
@@ -300,8 +373,8 @@ class Node(object):
 
         This is the _third_ function being called after the Node has been instantiated.
         """
-        self.log.info('Starting {personality} node {method}',
-                      personality=self.personality.NAME,
+        self.log.info('{note} [{method}]',
+                      note=hl('Starting node ..', color='green', bold=True),
                       method=hltype(Node.start))
 
         # a configuration must have been loaded before
@@ -324,8 +397,8 @@ class Node(object):
             self._node_id = controller_config['id']
             _node_id_source = 'explicit configuration'
         else:
-            self._node_id = u'{}'.format(socket.gethostname()).lower()
-            _node_id_source = 'hostname'
+            self._node_id = '{}-{}'.format(socket.gethostname(), os.getpid()).lower()
+            _node_id_source = 'hostname/pid'
         self.log.info('Node ID {node_id} set from {node_id_source}',
                       node_id=hlid(self._node_id),
                       node_id_source=_node_id_source)
@@ -342,8 +415,10 @@ class Node(object):
         self._controller = self.NODE_CONTROLLER(self)
 
         # local node management router
-        self._router_factory = RouterFactory(self._node_id, None)
+        self._router_factory = RouterFactory(self._node_id, None, None)
         self._router_session_factory = RouterSessionFactory(self._router_factory)
+
+        # start node-wide realm on node management router
         rlm_config = {
             'name': self._realm
         }
@@ -354,13 +429,22 @@ class Node(object):
         self._add_global_roles()
 
         # always add a realm service session
-        cfg = ComponentConfig(self._realm)
+        cfg = ComponentConfig(self._realm, controller=self._controller)
         rlm.session = (self.ROUTER_SERVICE)(cfg, router)
-        self._router_session_factory.add(rlm.session, router, authrole=u'trusted')
-        self.log.debug('Router service session attached [{router_service}]', router_service=qual(self.ROUTER_SERVICE))
+        self._router_session_factory.add(rlm.session,
+                                         router,
+                                         authid='serviceagent',
+                                         authrole='trusted')
+        self.log.info('{func} router service agent session attached [{router_service}]',
+                      func=hltype(self.start), router_service=hltype(self.ROUTER_SERVICE))
 
-        self._router_session_factory.add(self._controller, router, authrole=u'trusted')
-        self.log.debug('Node controller attached [{node_controller}]', node_controller=qual(self.NODE_CONTROLLER))
+        self._router_session_factory.add(self._controller,
+                                         router,
+                                         authid='nodecontroller',
+                                         authrole='controller')
+        self._service_sessions[self._realm] = self._controller
+        self.log.info('{func} node controller session attached [{node_controller}]',
+                      func=hltype(self.start), node_controller=hltype(self.NODE_CONTROLLER))
 
         # add extra node controller components
         self._add_extra_controller_components(controller_config)
@@ -372,7 +456,9 @@ class Node(object):
         self._shutdown_complete = Deferred()
 
         # startup the node personality ..
+        self.log.info('{func}::NODE_BOOT_BEGIN', func=hltype(self.personality.Node.boot))
         yield self.personality.Node.boot(self)
+        self.log.info('{func}::NODE_BOOT_COMPLETE', func=hltype(self.personality.Node.boot))
 
         # notify systemd that we are fully up and running
         try:
@@ -411,7 +497,7 @@ class Node(object):
 
         # start Manhole in node controller
         if 'manhole' in controller:
-            yield self._controller.call(u'crossbar.start_manhole', controller['manhole'], options=CallOptions())
+            yield self._controller.call('crossbar.start_manhole', controller['manhole'], options=CallOptions())
             self.log.debug("controller: manhole started")
 
         # startup all workers
@@ -428,7 +514,7 @@ class Node(object):
             if 'id' in worker:
                 worker_id = worker['id']
             else:
-                worker_id = u'worker{:03d}'.format(self._worker_no)
+                worker_id = 'worker{:03d}'.format(self._worker_no)
                 worker['id'] = worker_id
                 self._worker_no += 1
 
@@ -455,10 +541,10 @@ class Node(object):
                     # start the (native) worker
                     self.log.info(
                         'Order node to start "{worker_logname}" ..',
-                        worker_logname=worker_logname,
+                        worker_logname=hlid(worker_logname),
                     )
 
-                    d = self._controller.call(u'crossbar.start_worker', worker_id, worker_type, worker_options, options=CallOptions())
+                    d = self._controller.call('crossbar.start_worker', worker_id, worker_type, worker_options, options=CallOptions())
 
                     @inlineCallbacks
                     def configure_worker(res, worker_logname, worker_type, worker_id, worker):
@@ -480,22 +566,27 @@ class Node(object):
                                 "A native worker of type '{}' is configured but "
                                 "there is no method '{}' on {}".format(worker_type, method_name, type(self))
                             )
-                        yield config_fn(worker_logname, worker_id, worker)
+                        try:
+                            yield config_fn(worker_logname, worker_id, worker)
+                        except ApplicationError as e:
+                            if e.error != 'wamp.error.canceled':
+                                raise
+
                         self.log.info(
-                            "Ok, {worker_logname} configured",
-                            worker_logname=worker_logname,
+                            'Ok, worker "{worker_logname}" configured and ready!',
+                            worker_logname=hlid(worker_logname),
                         )
 
                     d.addCallback(configure_worker, worker_logname, worker_type, worker_id, worker)
 
             # guest worker processes setup
-            elif worker_type == u'guest':
+            elif worker_type == 'guest':
 
                 # now actually start the (guest) worker ..
 
                 # FIXME: start_worker() takes the whole configuration item for guest workers, whereas native workers
                 # only take the options (which is part of the whole config item for the worker)
-                d = self._controller.call(u'crossbar.start_worker', worker_id, worker_type, worker, options=CallOptions())
+                d = self._controller.call('crossbar.start_worker', worker_id, worker_type, worker, options=CallOptions())
 
             else:
                 raise Exception('logic error: unexpected worker_type="{}"'.format(worker_type))
@@ -507,7 +598,7 @@ class Node(object):
 
         yield gatherResults(dl)
 
-        self.log.info(hl('Ok, local node configuration booted successfully!', color='green', bold=True))
+        self.log.info(hl('Ok, local node configuration ran successfully.', color='green', bold=True))
 
     @inlineCallbacks
     def _configure_native_worker_common(self, worker_logname, worker_id, worker):
@@ -516,7 +607,7 @@ class Node(object):
         worker_options = worker.get('options', {})
         if False:
             if 'pythonpath' in worker_options:
-                added_paths = yield self._controller.call(u'crossbar.worker.{}.add_pythonpath'.format(worker_id), worker_options['pythonpath'], options=CallOptions())
+                added_paths = yield self._controller.call('crossbar.worker.{}.add_pythonpath'.format(worker_id), worker_options['pythonpath'], options=CallOptions())
                 self.log.warn("{worker}: PYTHONPATH extended for {paths}",
                               worker=worker_logname, paths=added_paths)
 
@@ -524,14 +615,14 @@ class Node(object):
         # should be done directly in NodeController._start_native_worker
         if True:
             if 'cpu_affinity' in worker_options:
-                new_affinity = yield self._controller.call(u'crossbar.worker.{}.set_cpu_affinity'.format(worker_id), worker_options['cpu_affinity'], options=CallOptions())
+                new_affinity = yield self._controller.call('crossbar.worker.{}.set_cpu_affinity'.format(worker_id), worker_options['cpu_affinity'], options=CallOptions())
                 self.log.debug("{worker}: CPU affinity set to {affinity}",
                                worker=worker_logname, affinity=new_affinity)
 
         # this is fine to start after the worker has been started, as manhole is
         # CB developer/support feature anyways (like a vendor diagnostics port)
         if 'manhole' in worker:
-            yield self._controller.call(u'crossbar.worker.{}.start_manhole'.format(worker_id), worker['manhole'], options=CallOptions())
+            yield self._controller.call('crossbar.worker.{}.start_manhole'.format(worker_id), worker['manhole'], options=CallOptions())
             self.log.debug("{worker}: manhole started",
                            worker=worker_logname)
 
@@ -556,7 +647,7 @@ class Node(object):
                 realm_id=hlid(realm_id),
             )
 
-            yield self._controller.call(u'crossbar.worker.{}.start_router_realm'.format(worker_id), realm_id, realm, options=CallOptions())
+            yield self._controller.call('crossbar.worker.{}.start_router_realm'.format(worker_id), realm_id, realm, options=CallOptions())
 
             self.log.info(
                 "Ok, {worker_logname} has started Realm {realm_id}",
@@ -579,7 +670,7 @@ class Node(object):
                     role_id=hlid(role_id),
                 )
 
-                yield self._controller.call(u'crossbar.worker.{}.start_router_realm_role'.format(worker_id), realm_id, role_id, role, options=CallOptions())
+                yield self._controller.call('crossbar.worker.{}.start_router_realm_role'.format(worker_id), realm_id, role_id, role, options=CallOptions())
 
                 self.log.info(
                     "Ok, Realm {realm_id} has started Role {role_id}",
@@ -597,7 +688,7 @@ class Node(object):
                 component['id'] = component_id
                 self._component_no += 1
 
-            yield self._controller.call(u'crossbar.worker.{}.start_router_component'.format(worker_id), component_id, component, options=CallOptions())
+            yield self._controller.call('crossbar.worker.{}.start_router_component'.format(worker_id), component_id, component, options=CallOptions())
             self.log.info(
                 "{logname}: component '{component}' started",
                 logname=worker_logname,
@@ -622,7 +713,7 @@ class Node(object):
                 transport_id=hlid(transport_id),
             )
 
-            yield self._controller.call(u'crossbar.worker.{}.start_router_transport'.format(worker_id),
+            yield self._controller.call('crossbar.worker.{}.start_router_transport'.format(worker_id),
                                         transport_id,
                                         transport,
                                         create_paths=add_paths_on_transport_create,
@@ -637,7 +728,7 @@ class Node(object):
 
                 if transport['type'] == 'web':
                     paths = transport.get('paths', {})
-                elif transport['type'] == 'universal':
+                elif transport['type'] in ('universal'):
                     paths = transport.get('web', {}).get('paths', {})
                 else:
                     paths = None
@@ -662,7 +753,7 @@ class Node(object):
                                 path=hluserid(path),
                             )
 
-                            yield self._controller.call(u'crossbar.worker.{}.start_web_transport_service'.format(worker_id),
+                            yield self._controller.call('crossbar.worker.{}.start_web_transport_service'.format(worker_id),
                                                         transport_id,
                                                         path,
                                                         webservice,
@@ -674,25 +765,41 @@ class Node(object):
                                 path=hluserid(path),
                             )
 
+        # start rlinks for realms
+        dl = []
+        for realm in worker.get('realms', []):
+            realm_id = realm['id']
+            for i, rlink in enumerate(realm.get('rlinks', [])):
+                if 'id' in rlink:
+                    rlink_id = rlink['id']
+                else:
+                    rlink_id = 'rlink{:03d}'.format(i)
+                    rlink['id'] = rlink_id
+
+                self.log.info(
+                    'Starting router-to-router "{rlink_id}" on realm "{realm_id}" ..',
+                    realm_id=hlid(realm_id),
+                    rlink_id=hlid(rlink_id),
+                )
+
+                d = self._controller.call('crossbar.worker.{}.start_router_realm_link'.format(worker_id), realm_id, rlink_id, rlink, options=CallOptions())
+
+                def done(_):
+                    self.log.info(
+                        'Ok, router-to-router {rlink_id} started on realm "{realm_id}".',
+                        realm_id=hlid(realm_id),
+                        rlink_id=hlid(rlink_id),
+                    )
+                d.addCallback(done)
+                dl.append(d)
+
+        # FIXME: rlinks must be started without waiting for them to be established. otherwise the start of other stuff
+        # is waiting for all rlinks to be up!
+        d = gatherResults(dl)
+
     @inlineCallbacks
     def _configure_native_worker_container(self, worker_logname, worker_id, worker):
         yield self._configure_native_worker_common(worker_logname, worker_id, worker)
-
-        # if components exit "very soon after" we try to start them,
-        # we consider that a failure and shut our node down. We remove
-        # this subscription 2 seconds after we're done starting
-        # everything (see below). This is necessary as start_component
-        # returns as soon as we've established a connection to the
-        # component
-        def component_exited(info):
-            component_id = info.get("id")
-            self.log.critical("Component '{component_id}' failed to start; shutting down node.", component_id=component_id)
-            try:
-                self._reactor.stop()
-            except twisted.internet.error.ReactorNotRunning:
-                pass
-        topic = u'crossbar.worker.{}.container.on_component_stop'.format(worker_id)
-        component_stop_sub = yield self._controller.subscribe(component_exited, topic)
 
         # start components to run embedded in the container
         #
@@ -705,12 +812,9 @@ class Node(object):
                 component['id'] = component_id
                 self._component_no += 1
 
-            yield self._controller.call(u'crossbar.worker.{}.start_component'.format(worker_id), component_id, component, options=CallOptions())
+            yield self._controller.call('crossbar.worker.{}.start_component'.format(worker_id), component_id, component, options=CallOptions())
             self.log.info("{worker}: component '{component_id}' started",
                           worker=worker_logname, component_id=component_id)
-
-        # after 2 seconds, consider all the application components running
-        self._reactor.callLater(2, component_stop_sub.unsubscribe)
 
     @inlineCallbacks
     def _configure_native_worker_websocket_testee(self, worker_logname, worker_id, worker):
@@ -723,9 +827,101 @@ class Node(object):
         transport['id'] = transport_id
         self._transport_no = 1
 
-        yield self._controller.call(u'crossbar.worker.{}.start_websocket_testee_transport'.format(worker_id), transport_id, transport, options=CallOptions())
+        yield self._controller.call('crossbar.worker.{}.start_websocket_testee_transport'.format(worker_id), transport_id, transport, options=CallOptions())
         self.log.info(
             "{logname}: transport '{tid}' started",
             logname=worker_logname,
             tid=transport_id,
         )
+
+    @inlineCallbacks
+    def _configure_native_worker_proxy(self, worker_logname, worker_id, worker):
+        yield self._configure_native_worker_common(worker_logname, worker_id, worker)
+
+        # start transports on proxy
+        for i, transport in enumerate(worker.get('transports', [])):
+
+            if 'id' in transport:
+                transport_id = transport['id']
+            else:
+                transport_id = 'transport{:03d}'.format(i)
+                transport['id'] = transport_id
+
+            self.log.info(
+                "Order {worker_logname} to start Transport {transport_id}",
+                worker_logname=worker_logname,
+                transport_id=hlid(transport_id),
+            )
+
+            # XXX we're doing startup, and begining proxy workers --
+            # want to share the web-transport etc etc stuff between
+            # these and otehr kinds of routers / transports
+            yield self._controller.call('crossbar.worker.{}.start_proxy_transport'.format(worker_id),
+                                        transport_id,
+                                        transport,
+                                        options=CallOptions())
+
+            if transport['type'] == 'web':
+                paths = transport.get('paths', {})
+            elif transport['type'] in ('universal'):
+                paths = transport.get('web', {}).get('paths', {})
+            else:
+                paths = None
+
+            # Web service paths
+            if paths:
+                for path in sorted(paths):
+                    if path != '/':
+                        webservice = paths[path]
+
+                        if 'id' in webservice:
+                            webservice_id = webservice['id']
+                        else:
+                            webservice_id = 'webservice{:03d}'.format(self._webservice_no)
+                            webservice['id'] = webservice_id
+                            self._webservice_no += 1
+
+                        self.log.info(
+                            "Order Transport {transport_id} to start Web Service {webservice_id}",
+                            transport_id=hlid(transport_id),
+                            webservice_id=hlid(webservice_id),
+                            path=hluserid(path),
+                        )
+
+                        yield self._controller.call('crossbar.worker.{}.start_web_transport_service'.format(worker_id),
+                                                    transport_id,
+                                                    path,
+                                                    webservice,
+                                                    options=CallOptions())
+                        self.log.info(
+                            "Ok, Transport {transport_id} has started Web Service {webservice_id}",
+                            transport_id=hlid(transport_id),
+                            webservice_id=hlid(webservice_id),
+                            path=hluserid(path),
+                        )
+
+            self.log.info(
+                "Ok, {worker_logname} has started Transport {transport_id}",
+                worker_logname=worker_logname,
+                transport_id=hlid(transport_id),
+            )
+
+        # set up backend connections on the proxy
+
+        for i, connection_name in enumerate(worker.get('connections', {})):
+            print(i, connection_name)
+            yield self._controller.call(
+                'crossbar.worker.{}.start_proxy_connection'.format(worker_id),
+                connection_name,
+                worker['connections'].get(connection_name, {}),
+            )
+
+        # set up realms and roles on the proxy
+
+        for i, realm_name in enumerate(worker.get('routes', {})):
+            print(i, realm_name)
+            yield self._controller.call(
+                'crossbar.worker.{}.start_proxy_route'.format(worker_id),
+                realm_name,
+                worker['routes'].get(realm_name, {}),
+            )

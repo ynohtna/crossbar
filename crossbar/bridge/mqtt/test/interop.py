@@ -33,8 +33,6 @@ Server interop tests, making sure Crossbar's MQTT adapter responds the same as
 other MQTT servers.
 """
 
-from __future__ import print_function
-
 import click
 import attr
 import sys
@@ -66,8 +64,8 @@ class Result(object):
 
 
 @click.command()
-@click.option("--host")
-@click.option("--port")
+@click.option("--host", help='Host address to test.')
+@click.option("--port", type=int, help='Post of the host to test.')
 def run(host, port):
 
     port = int(port)

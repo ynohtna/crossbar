@@ -29,8 +29,6 @@
 #####################################################################################
 
 
-from __future__ import absolute_import
-
 from datetime import datetime
 
 from txaio import make_logger
@@ -98,7 +96,7 @@ class RouterTransport(object):
         except Exception as e:
             emsg = "Invalid router transport configuration: {}".format(e)
             self.log.error(emsg)
-            raise ApplicationError(u"crossbar.error.invalid_configuration", emsg)
+            raise ApplicationError("crossbar.error.invalid_configuration", emsg)
         else:
             self.log.debug("Router transport parsed successfully (transport_id={transport_id}, transport_type={transport_type})",
                            transport_id=transport_id, transport_type=config['type'])
@@ -118,12 +116,12 @@ class RouterTransport(object):
 
     def marshal(self):
         return {
-            u'id': self._transport_id,
-            u'type': self._type,
-            u'config': self._config,
-            u'created_at': utcstr(self._created_at),
-            u'listening_since': utcstr(self._listening_since) if self._listening_since else None,
-            u'state': self._state,
+            'id': self._transport_id,
+            'type': self._type,
+            'config': self._config,
+            'created_at': utcstr(self._created_at),
+            'listening_since': utcstr(self._listening_since) if self._listening_since else None,
+            'state': self._state,
         }
 
     @property
@@ -243,11 +241,10 @@ class RouterTransport(object):
         returnValue(self)
 
     def _create_web_factory(self, create_paths=False, ignore=[]):
-        raise NotImplementedError()
+        raise NotImplementedError("_create_web_factory")
 
     @inlineCallbacks
     def _create_factory(self, create_paths=False, ignore=[]):
-
         # Twisted (listening endpoint) transport factory
         transport_factory = None
 
@@ -258,14 +255,14 @@ class RouterTransport(object):
         # standalone WAMP-RawSocket transport
         #
         if self._config['type'] == 'rawsocket':
-            transport_factory = WampRawSocketServerFactory(self._worker.router_session_factory, self._config)
+            transport_factory = WampRawSocketServerFactory(self._worker._router_session_factory, self._config)
             transport_factory.noisy = False
 
         # standalone WAMP-WebSocket transport
         #
         elif self._config['type'] == 'websocket':
             assert (self._templates)
-            transport_factory = WampWebSocketServerFactory(self._worker.router_session_factory, self._cbdir, self._config,
+            transport_factory = WampWebSocketServerFactory(self._worker._router_session_factory, self._cbdir, self._config,
                                                            self._templates)
             transport_factory.noisy = False
 
@@ -290,7 +287,7 @@ class RouterTransport(object):
         #
         elif self._config['type'] == 'mqtt':
             transport_factory = WampMQTTServerFactory(
-                self._worker.router_session_factory, self._config, self._worker._reactor)
+                self._worker._router_session_factory, self._config, self._worker._reactor)
             transport_factory.noisy = False
 
         # Twisted Web based transport
@@ -309,14 +306,14 @@ class RouterTransport(object):
                 web_factory, root_webservice = None, None
 
             if 'rawsocket' in self._config:
-                rawsocket_factory = WampRawSocketServerFactory(self._worker.router_session_factory, self._config['rawsocket'])
+                rawsocket_factory = WampRawSocketServerFactory(self._worker._router_session_factory, self._config['rawsocket'])
                 rawsocket_factory.noisy = False
             else:
                 rawsocket_factory = None
 
             if 'mqtt' in self._config:
                 mqtt_factory = WampMQTTServerFactory(
-                    self._worker.router_session_factory, self._config['mqtt'], self._worker._reactor)
+                    self._worker._router_session_factory, self._config['mqtt'], self._worker._reactor)
                 mqtt_factory.noisy = False
             else:
                 mqtt_factory = None
@@ -325,7 +322,7 @@ class RouterTransport(object):
                 assert (self._templates)
                 websocket_factory_map = {}
                 for websocket_url_first_component, websocket_config in self._config['websocket'].items():
-                    websocket_transport_factory = WampWebSocketServerFactory(self._worker.router_session_factory, self._cbdir,
+                    websocket_transport_factory = WampWebSocketServerFactory(self._worker._router_session_factory, self._cbdir,
                                                                              websocket_config, self._templates)
                     websocket_transport_factory.noisy = False
                     websocket_factory_map[websocket_url_first_component] = websocket_transport_factory
@@ -429,16 +426,15 @@ def create_router_transport(worker, transport_id, config):
     :param config:
     :return:
     """
-    worker.log.info('Creating router transport for "{transport_id}" {factory}',
-                    transport_id=transport_id,
-                    factory=hltype(create_router_transport))
+    worker.log.info('Creating router transport for "{transport_id}" ..',
+                    transport_id=transport_id)
 
     if config['type'] == 'web' or (config['type'] == 'universal' and config.get('web', {})):
         transport = RouterWebTransport(worker, transport_id, config)
     else:
         transport = RouterTransport(worker, transport_id, config)
 
-    worker.log.info('Router transport created for "{transport_id}" {transport_class}',
+    worker.log.info('Router transport created for "{transport_id}" [transport_class={transport_class}]',
                     transport_id=transport_id,
                     transport_class=hltype(transport.__class__))
     return transport

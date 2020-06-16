@@ -1,6 +1,5 @@
 name: crossbar
-version: latest
-version-script: git describe --always | sed -e 's/-/+git/;y/-/./' | tail -c +2
+adopt-info: crossbar
 summary: Crossbar.io - Polyglot application router.
 description: |
   Crossbar.io is a networking platform for distributed and microservice
@@ -22,21 +21,56 @@ architectures:
   - build-on: armhf
     run-on: armhf
 
+  - build-on: arm64
+    run-on: arm64
+
 apps:
   crossbar:
-    command: crossbar
+    command: python3.7 -u $SNAP/bin/crossbar
+    environment:
+      PATH: $PATH:$SNAP/usr/bin:$SNAP/bin
+      PYTHONPATH: $PYTHONPATH:$SNAP/lib/python3.7/site-packages
     plugs:
       - home
       - network
       - network-bind
 
 parts:
+  py37:
+    plugin: nil
+    stage-packages:
+      - python3.7
+    build-packages:
+      - wget
+      - python3.7
+      - python3.7-dev
+      - python3.7-venv
+      - python3.7-distutils
+    override-build: |
+      snapcraftctl build
+      wget -O - https://bootstrap.pypa.io/get-pip.py | /usr/bin/python3.7 -u
+      /usr/bin/python3.7 -m compileall -b $SNAPCRAFT_PART_INSTALL
+      find $SNAPCRAFT_PART_INSTALL -type f -name "*.py" -exec rm {} \;
   crossbar:
-    plugin: python
+    plugin: nil
+    after:
+      - py37
     source: .
+    override-build: |
+      snapcraftctl build
+      # Build and install Crossbar
+      export MAKEFLAGS="-j$(nproc)"
+      /usr/bin/python3.7 -m pip install --ignore-installed -U --no-compile --prefix $SNAPCRAFT_PART_INSTALL .
+      /usr/bin/python3.7 -m compileall -b -x .*\.syntaxerror.py$ $SNAPCRAFT_PART_INSTALL
+      find $SNAPCRAFT_PART_INSTALL -type f -name "*.py" -exec rm {} \;
+      find $SNAPCRAFT_PART_INSTALL -type f -name "*.so" -exec strip -s {} \;
+      # Set package version
+      snapcraftctl set-version $(git describe --always --dirty | sed -e 's/-/+git/;y/-/./' | tail -c +2)
     stage-packages:
       - libsnappy1v5
+      - libunwind8
     build-packages:
+      - build-essential
       - gcc
       - libffi-dev
       - libssl-dev
@@ -44,9 +78,5 @@ parts:
       - libbz2-dev
       - libsnappy-dev
       - libunwind-dev
-    override-prime: |
-      snapcraftctl prime
-      echo "Compiling pyc files..."
-      # Delete the file that would fail the compilation process
-      rm $SNAPCRAFT_PRIME/lib/python3.6/site-packages/crossbar/worker/test/examples/syntaxerror.py
-      $SNAPCRAFT_PART_INSTALL/usr/bin/python3 -m compileall -q $SNAPCRAFT_PRIME
+      # required by package versioning
+      - git

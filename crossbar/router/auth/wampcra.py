@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 import json
 
 from autobahn import util
@@ -37,6 +35,9 @@ from autobahn.wamp import auth
 from autobahn.wamp import types
 
 from crossbar.router.auth.pending import PendingAuth
+
+import txaio
+
 
 __all__ = ('PendingAuthWampCra',)
 
@@ -46,10 +47,12 @@ class PendingAuthWampCra(PendingAuth):
     Pending WAMP-CRA authentication.
     """
 
-    AUTHMETHOD = u'wampcra'
+    AUTHMETHOD = 'wampcra'
 
-    def __init__(self, session, config):
-        PendingAuth.__init__(self, session, config)
+    def __init__(self, pending_session_id, transport_info, realm_container, config):
+        super(PendingAuthWampCra, self).__init__(
+            pending_session_id, transport_info, realm_container, config,
+        )
 
         # The signature we expect the client to send in AUTHENTICATE.
         self._signature = None
@@ -59,13 +62,13 @@ class PendingAuthWampCra(PendingAuth):
         Returns: challenge, signature
         """
         challenge_obj = {
-            u'authid': self._authid,
-            u'authrole': self._authrole,
-            u'authmethod': self._authmethod,
-            u'authprovider': self._authprovider,
-            u'session': self._session_details[u'session'],
-            u'nonce': util.newid(64),
-            u'timestamp': util.utcnow()
+            'authid': self._authid,
+            'authrole': self._authrole,
+            'authmethod': self._authmethod,
+            'authprovider': self._authprovider,
+            'session': self._session_details['session'],
+            'nonce': util.newid(64),
+            'timestamp': util.utcnow()
         }
         challenge = json.dumps(challenge_obj, ensure_ascii=False)
 
@@ -79,15 +82,15 @@ class PendingAuthWampCra(PendingAuth):
 
         # extra data to send to client in CHALLENGE
         extra = {
-            u'challenge': challenge
+            'challenge': challenge
         }
 
         # when using salted passwords, provide the client with
         # the salt and then PBKDF2 parameters used
         if 'salt' in user:
-            extra[u'salt'] = user['salt']
-            extra[u'iterations'] = user.get('iterations', 1000)
-            extra[u'keylen'] = user.get('keylen', 32)
+            extra['salt'] = user['salt']
+            extra['iterations'] = user.get('iterations', 1000)
+            extra['keylen'] = user.get('keylen', 32)
 
         return extra, signature
 
@@ -100,13 +103,13 @@ class PendingAuthWampCra(PendingAuth):
         self._authid = details.authid
 
         # use static principal database from configuration
-        if self._config[u'type'] == u'static':
+        if self._config['type'] == 'static':
 
-            self._authprovider = u'static'
+            self._authprovider = 'static'
 
-            if self._authid in self._config.get(u'users', {}):
+            if self._authid in self._config.get('users', {}):
 
-                principal = self._config[u'users'][self._authid]
+                principal = self._config['users'][self._authid]
 
                 error = self._assign_principal(principal)
                 if error:
@@ -118,40 +121,44 @@ class PendingAuthWampCra(PendingAuth):
 
                 return types.Challenge(self._authmethod, extra)
             else:
-                return types.Deny(message=u'no principal with authid "{}" exists'.format(details.authid))
+                return types.Deny(message='no principal with authid "{}" exists'.format(details.authid))
 
         # use configured procedure to dynamically get a ticket for the principal
-        elif self._config[u'type'] == u'dynamic':
+        elif self._config['type'] == 'dynamic':
 
-            self._authprovider = u'dynamic'
+            self._authprovider = 'dynamic'
 
-            error = self._init_dynamic_authenticator()
-            if error:
-                return error
+            init_d = txaio.as_future(self._init_dynamic_authenticator)
 
-            self._session_details[u'authmethod'] = self._authmethod  # from AUTHMETHOD, via base
-            self._session_details[u'authextra'] = details.authextra
+            def init(result):
+                if result:
+                    return result
 
-            d = self._authenticator_session.call(self._authenticator, realm, details.authid, self._session_details)
+                self._session_details['authmethod'] = self._authmethod  # from AUTHMETHOD, via base
+                self._session_details['authextra'] = details.authextra
 
-            def on_authenticate_ok(principal):
-                error = self._assign_principal(principal)
-                if error:
-                    return error
+                d = self._authenticator_session.call(self._authenticator, realm, details.authid, self._session_details)
 
-                # now compute CHALLENGE.Extra and signature expected
-                extra, self._signature = self._compute_challenge(principal)
-                return types.Challenge(self._authmethod, extra)
+                def on_authenticate_ok(principal):
+                    error = self._assign_principal(principal)
+                    if error:
+                        return error
 
-            def on_authenticate_error(err):
-                return self._marshal_dynamic_authenticator_error(err)
+                    # now compute CHALLENGE.Extra and signature expected
+                    extra, self._signature = self._compute_challenge(principal)
+                    return types.Challenge(self._authmethod, extra)
 
-            d.addCallbacks(on_authenticate_ok, on_authenticate_error)
-            return d
+                def on_authenticate_error(err):
+                    return self._marshal_dynamic_authenticator_error(err)
+
+                d.addCallbacks(on_authenticate_ok, on_authenticate_error)
+                return d
+            init_d.addBoth(init)
+            return init_d
 
         else:
             # should not arrive here, as config errors should be caught earlier
-            return types.Deny(message=u'invalid authentication configuration (authentication type "{}" is unknown)'.format(self._config['type']))
+            return types.Deny(message='invalid authentication configuration (authentication type "{}" is unknown)'.format(self._config['type']))
 
     def authenticate(self, signature):
 
@@ -160,4 +167,4 @@ class PendingAuthWampCra(PendingAuth):
             return self._accept()
         else:
             # signature was invalid: deny the client
-            return types.Deny(message=u"WAMP-CRA signature is invalid")
+            return types.Deny(message="WAMP-CRA signature is invalid")

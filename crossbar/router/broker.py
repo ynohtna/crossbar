@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import, division
-
 import copy
 
 import txaio
@@ -46,6 +44,7 @@ from autobahn.wamp.message import \
 
 from crossbar.router.observation import UriObservationMap
 from crossbar.router import RouterOptions, NotAttached
+from crossbar._util import hlid, hltype, hlflag
 
 from txaio import make_logger
 
@@ -142,7 +141,7 @@ class Broker(object):
         if session not in self._session_to_subscriptions:
             self._session_to_subscriptions[session] = set()
         else:
-            raise Exception(u"session with ID {} already attached".format(session._session_id))
+            raise Exception("session with ID {} already attached".format(session._session_id))
 
     def detach(self, session):
         """
@@ -166,7 +165,7 @@ class Broker(object):
                 #
                 if self._router._realm and \
                    self._router._realm.session and \
-                   not subscription.uri.startswith(u'wamp.'):
+                   not subscription.uri.startswith('wamp.'):
 
                     def _publish(subscription):
                         service_session = self._router._realm.session
@@ -180,7 +179,7 @@ class Broker(object):
 
                         if was_subscribed:
                             service_session.publish(
-                                u'wamp.subscription.on_unsubscribe',
+                                'wamp.subscription.on_unsubscribe',
                                 session._session_id,
                                 subscription.id,
                                 options=options,
@@ -189,7 +188,7 @@ class Broker(object):
                         if was_deleted:
                             options.correlation_is_last = True
                             service_session.publish(
-                                u'wamp.subscription.on_delete',
+                                'wamp.subscription.on_delete',
                                 session._session_id,
                                 subscription.id,
                                 options=options,
@@ -286,7 +285,7 @@ class Broker(object):
                     publish.correlation_is_last = False
                     self._router._factory._worker._maybe_trace_rx_msg(session, publish)
 
-                reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_URI, [u"publish with invalid topic URI '{0}' (URI strict checking {1})".format(publish.topic, self._option_uri_strict)])
+                reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_URI, ["publish with invalid topic URI '{0}' (URI strict checking {1})".format(publish.topic, self._option_uri_strict)])
                 reply.correlation_id = publish.correlation_id
                 reply.correlation_uri = publish.topic
                 reply.correlation_is_anchor = False
@@ -302,15 +301,15 @@ class Broker(object):
         # disallow publication to topics starting with "wamp." other than for
         # trusted sessions (that are sessions built into Crossbar.io routing core)
         #
-        if session._authrole is not None and session._authrole != u"trusted":
-            is_restricted = publish.topic.startswith(u"wamp.")
+        if session._authrole is not None and session._authrole != "trusted":
+            is_restricted = publish.topic.startswith("wamp.")
             if is_restricted:
                 if publish.acknowledge:
                     if self._router.is_traced:
                         publish.correlation_is_last = False
                         self._router._factory._worker._maybe_trace_rx_msg(session, publish)
 
-                    reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_URI, [u"publish with restricted topic URI '{0}'".format(publish.topic)])
+                    reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_URI, ["publish with restricted topic URI '{0}'".format(publish.topic)])
                     reply.correlation_id = publish.correlation_id
                     reply.correlation_uri = publish.topic
                     reply.correlation_is_anchor = False
@@ -375,7 +374,7 @@ class Broker(object):
                             publish.correlation_is_last = False
                             self._router._factory._worker._maybe_trace_rx_msg(session, publish)
 
-                        reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_ARGUMENT, [u"publish to topic URI '{0}' with invalid application payload: {1}".format(publish.topic, e)])
+                        reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.INVALID_ARGUMENT, ["publish to topic URI '{0}' with invalid application payload: {1}".format(publish.topic, e)])
                         reply.correlation_id = publish.correlation_id
                         reply.correlation_uri = publish.topic
                         reply.correlation_is_anchor = False
@@ -390,21 +389,30 @@ class Broker(object):
 
             # authorize PUBLISH action
             #
-            d = self._router.authorize(session, publish.topic, u'publish', options=publish.marshal_options())
+            d = self._router.authorize(session, publish.topic, 'publish', options=publish.marshal_options())
 
             def on_authorize_success(authorization):
-
                 # the call to authorize the action _itself_ succeeded. now go on depending on whether
                 # the action was actually authorized or not ..
-                #
-                if not authorization[u'allow']:
+                if not publish.topic.endswith('.on_log'):
+                    self.log.debug(
+                        '{func}::on_authorize_success() - permission {result} for PUBLISH to topic "{topic}" [realm="{realm}", session_id={session_id}, authid="{authid}", authrole="{authrole}"]',
+                        func=hltype(self.processPublish),
+                        result=hlflag(authorization['allow'], 'GRANTED', 'DENIED'),
+                        topic=hlid(publish.topic),
+                        realm=hlid(session._realm),
+                        session_id=hlid(session._session_id),
+                        authid=hlid(session._authid),
+                        authrole=hlid(session._authrole))
+
+                if not authorization['allow']:
 
                     if publish.acknowledge:
                         if self._router.is_traced:
                             publish.correlation_is_last = False
                             self._router._factory._worker._maybe_trace_rx_msg(session, publish)
 
-                        reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.NOT_AUTHORIZED, [u"session not authorized to publish to topic '{0}'".format(publish.topic)])
+                        reply = message.Error(message.Publish.MESSAGE_TYPE, publish.request, ApplicationError.NOT_AUTHORIZED, ["session not authorized to publish to topic '{0}'".format(publish.topic)])
                         reply.correlation_id = publish.correlation_id
                         reply.correlation_uri = publish.topic
                         reply.correlation_is_anchor = False
@@ -424,9 +432,9 @@ class Broker(object):
 
                     # publisher disclosure
                     #
-                    if authorization[u'disclose']:
+                    if authorization['disclose']:
                         disclose = True
-                    elif (publish.topic.startswith(u"wamp.") or publish.topic.startswith(u"crossbar.")):
+                    elif (publish.topic.startswith("wamp.") or publish.topic.startswith("crossbar.")):
                         disclose = True
                     else:
                         disclose = False
@@ -437,6 +445,7 @@ class Broker(object):
                             publisher = publish.forward_for[0]['session']
                             publisher_authid = publish.forward_for[0]['authid']
                             publisher_authrole = publish.forward_for[0]['authrole']
+                            assert session._session_id is not None
                             forward_for = publish.forward_for + [
                                 {
                                     'session': session._session_id,
@@ -721,7 +730,7 @@ class Broker(object):
                         message.Publish.MESSAGE_TYPE,
                         publish.request,
                         ApplicationError.AUTHORIZATION_FAILED,
-                        [u"failed to authorize session for publishing to topic URI '{0}': {1}".format(publish.topic, err.value)]
+                        ["failed to authorize session for publishing to topic URI '{0}': {1}".format(publish.topic, err.value)]
                     )
                     reply.correlation_id = publish.correlation_id
                     reply.correlation_uri = publish.topic
@@ -753,22 +762,22 @@ class Broker(object):
         # prefix subscriptions
         #
         if self._option_uri_strict:
-            if subscribe.match == u"wildcard":
+            if subscribe.match == "wildcard":
                 uri_is_valid = _URI_PAT_STRICT_EMPTY.match(subscribe.topic)
-            elif subscribe.match == u"prefix":
+            elif subscribe.match == "prefix":
                 uri_is_valid = _URI_PAT_STRICT_LAST_EMPTY.match(subscribe.topic)
             else:
                 uri_is_valid = _URI_PAT_STRICT_NON_EMPTY.match(subscribe.topic)
         else:
-            if subscribe.match == u"wildcard":
+            if subscribe.match == "wildcard":
                 uri_is_valid = _URI_PAT_LOOSE_EMPTY.match(subscribe.topic)
-            elif subscribe.match == u"prefix":
+            elif subscribe.match == "prefix":
                 uri_is_valid = _URI_PAT_LOOSE_LAST_EMPTY.match(subscribe.topic)
             else:
                 uri_is_valid = _URI_PAT_LOOSE_NON_EMPTY.match(subscribe.topic)
 
         if not uri_is_valid:
-            reply = message.Error(message.Subscribe.MESSAGE_TYPE, subscribe.request, ApplicationError.INVALID_URI, [u"subscribe for invalid topic URI '{0}'".format(subscribe.topic)])
+            reply = message.Error(message.Subscribe.MESSAGE_TYPE, subscribe.request, ApplicationError.INVALID_URI, ["subscribe for invalid topic URI '{0}'".format(subscribe.topic)])
             reply.correlation_id = subscribe.correlation_id
             reply.correlation_uri = subscribe.topic
             reply.correlation_is_anchor = False
@@ -778,19 +787,52 @@ class Broker(object):
 
         # authorize SUBSCRIBE action
         #
-        d = self._router.authorize(session, subscribe.topic, u'subscribe', options=subscribe.marshal_options())
+        d = self._router.authorize(session, subscribe.topic, 'subscribe', options=subscribe.marshal_options())
 
         def on_authorize_success(authorization):
-            if not authorization[u'allow']:
+            if not subscribe.topic.endswith('.on_log'):
+                self.log.debug(
+                    '{func}::on_authorize_success() - permission {result} for SUBSCRIBE to topic "{topic}" [realm="{realm}", session_id={session_id}, authid="{authid}", authrole="{authrole}"]',
+                    func=hltype(self.processSubscribe),
+                    result=hlflag(authorization['allow'], 'GRANTED', 'DENIED'),
+                    topic=hlid(subscribe.topic),
+                    realm=hlid(session._realm),
+                    session_id=hlid(session._session_id),
+                    authid=hlid(session._authid),
+                    authrole=hlid(session._authrole))
+
+            if not authorization['allow']:
                 # error reply since session is not authorized to subscribe
-                #
-                replies = [message.Error(message.Subscribe.MESSAGE_TYPE, subscribe.request, ApplicationError.NOT_AUTHORIZED, [u"session is not authorized to subscribe to topic '{0}'".format(subscribe.topic)])]
+                replies = [
+                    message.Error(
+                        message.Subscribe.MESSAGE_TYPE,
+                        subscribe.request,
+                        ApplicationError.NOT_AUTHORIZED,
+                        ['session (session_id={}, authid="{}", authrole="{}") is not authorized to subscribe to topic "{}" on realm "{}"'.format(
+                            session._session_id, session._authid, session._authrole, subscribe.topic, session._realm)])
+                ]
                 replies[0].correlation_id = subscribe.correlation_id
                 replies[0].correlation_uri = subscribe.topic
                 replies[0].correlation_is_anchor = False
                 replies[0].correlation_is_last = True
 
             else:
+                # if the session disconencted while the authorization was
+                # being checked, stop
+                if session not in self._session_to_subscriptions:
+                    # if the session *really* disconnected, it won't have
+                    # a _session_id any longer, so we double-check
+                    if session._session_id is not None:
+                        self.log.error(
+                            "Session '{session_id}' still appears valid, but isn't in subscription map",
+                            session_id=session._session_id,
+                        )
+                    self.log.info(
+                        "Session vanished while subscribing to '{topic}'",
+                        topic=subscribe.topic,
+                    )
+                    return
+
                 # ok, session authorized to subscribe. now get the subscription
                 #
                 subscription, was_already_subscribed, is_first_subscriber = self._subscription_map.add_observer(session, subscribe.topic, subscribe.match, extra=SubscriptionExtra())
@@ -803,7 +845,7 @@ class Broker(object):
                 #
                 if self._router._realm and \
                    self._router._realm.session and \
-                   not subscription.uri.startswith(u'wamp.') and \
+                   not subscription.uri.startswith('wamp.') and \
                    (is_first_subscriber or not was_already_subscribed):
 
                     has_follow_up_messages = True
@@ -827,13 +869,13 @@ class Broker(object):
 
                         if is_first_subscriber:
                             subscription_details = {
-                                u'id': subscription.id,
-                                u'created': subscription.created,
-                                u'uri': subscription.uri,
-                                u'match': subscription.match,
+                                'id': subscription.id,
+                                'created': subscription.created,
+                                'uri': subscription.uri,
+                                'match': subscription.match,
                             }
                             service_session.publish(
-                                u'wamp.subscription.on_create',
+                                'wamp.subscription.on_create',
                                 session._session_id,
                                 subscription_details,
                                 options=options,
@@ -844,7 +886,7 @@ class Broker(object):
                                 options.correlation_is_last = True
 
                             service_session.publish(
-                                u'wamp.subscription.on_subscribe',
+                                'wamp.subscription.on_subscribe',
                                 session._session_id,
                                 subscription.id,
                                 options=options,
@@ -931,7 +973,7 @@ class Broker(object):
                 message.Subscribe.MESSAGE_TYPE,
                 subscribe.request,
                 ApplicationError.AUTHORIZATION_FAILED,
-                [u"failed to authorize session for subscribing to topic URI '{0}': {1}".format(subscribe.topic, err.value)]
+                ["failed to authorize session for subscribing to topic URI '{0}': {1}".format(subscribe.topic, err.value)]
             )
             reply.correlation_id = subscribe.correlation_id
             reply.correlation_uri = subscribe.topic
@@ -1014,7 +1056,7 @@ class Broker(object):
         #
         if self._router._realm and \
            self._router._realm.session and \
-           not subscription.uri.startswith(u'wamp.') and \
+           not subscription.uri.startswith('wamp.') and \
            (was_subscribed or was_deleted):
 
             has_follow_up_messages = True
@@ -1038,7 +1080,7 @@ class Broker(object):
 
                 if was_subscribed:
                     service_session.publish(
-                        u'wamp.subscription.on_unsubscribe',
+                        'wamp.subscription.on_unsubscribe',
                         session._session_id,
                         subscription.id,
                         options=options,
@@ -1049,7 +1091,7 @@ class Broker(object):
                         options.correlation_is_last = True
 
                     service_session.publish(
-                        u'wamp.subscription.on_delete',
+                        'wamp.subscription.on_delete',
                         session._session_id,
                         subscription.id,
                         options=options,

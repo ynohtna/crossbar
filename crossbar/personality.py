@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 import time
 from collections.abc import Mapping
 
@@ -44,9 +42,18 @@ from crossbar.worker.router import RouterController
 from crossbar.worker import transport
 from crossbar.worker.container import ContainerController
 from crossbar.worker.testee import WebSocketTesteeController
+from crossbar.worker.proxy import ProxyController, ProxyWorkerProcess
 from crossbar.webservice import base
-from crossbar.webservice import wsgi, rest, longpoll, websocket, misc, static
+from crossbar.webservice import wsgi, rest, longpoll, websocket, misc, static, archive, wap
 from crossbar.router.realmstore import MemoryRealmStore
+
+
+def do_nothing(*args, **kw):
+    return
+
+
+def _check_proxy_config(personality, config):
+    pass
 
 
 def default_native_workers():
@@ -63,8 +70,8 @@ def default_native_workers():
 
         'logname': 'Router',
         'topics': {
-            'starting': u'crossbar.on_router_starting',
-            'started': u'crossbar.on_router_started',
+            'starting': 'crossbar.on_router_starting',
+            'started': 'crossbar.on_router_started',
         }
     }
     factory['container'] = {
@@ -79,8 +86,8 @@ def default_native_workers():
 
         'logname': 'Container',
         'topics': {
-            'starting': u'crossbar.on_container_starting',
-            'started': u'crossbar.on_container_started',
+            'starting': 'crossbar.on_container_starting',
+            'started': 'crossbar.on_container_started',
         }
     }
     factory['websocket-testee'] = {
@@ -95,8 +102,23 @@ def default_native_workers():
 
         'logname': 'WebSocketTestee',
         'topics': {
-            'starting': u'crossbar.on_websocket_testee_starting',
-            'started': u'crossbar.on_websocket_testee_started',
+            'starting': 'crossbar.on_websocket_testee_starting',
+            'started': 'crossbar.on_websocket_testee_started',
+        }
+    }
+    factory['proxy'] = {
+        'process_class': ProxyWorkerProcess,
+        'class': ProxyWorkerProcess,
+        'worker_class': ProxyController,
+
+        # FIXME: check a whole proxy worker configuration item (including transports, backends, ..)
+        'checkconfig_item': _check_proxy_config,
+        # FIXME: only check proxy worker options
+        'checkconfig_options': do_nothing,  # checkconfig.check_native_worker_options,
+        'logname': 'Proxy',
+        'topics': {
+            'starting': 'crossbar.on_proxy_starting',
+            'started': 'crossbar.on_proxy_started',
         }
     }
     return factory
@@ -226,6 +248,9 @@ class Personality(object):
         'caller': checkconfig.check_web_path_service_caller,
         'publisher': checkconfig.check_web_path_service_publisher,
         'webhook': checkconfig.check_web_path_service_webhook,
+
+        'archive': archive.RouterWebServiceArchive.check,
+        'wap': wap.RouterWebServiceWap.check,
     }
 
     WEB_SERVICE_FACTORIES = {
@@ -253,9 +278,13 @@ class Personality(object):
         'caller': rest.RouterWebServiceRestCaller,
         'publisher': rest.RouterWebServiceRestPublisher,
         'webhook': rest.RouterWebServiceWebhook,
+
+        'archive': archive.RouterWebServiceArchive,
+        'wap': wap.RouterWebServiceWap,
     }
 
-    EXTRA_AUTH_METHODS = dict()
+    EXTRA_AUTH_METHODS = {
+    }
 
     REALM_STORES = {
         'memory': MemoryRealmStore
